@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::queue::SnerdQueue;
+use crate::sharded_queue::SnerdShardedQueue;
 
 /// A single entry in the dashboard's Progress Stream.
 struct ProgressEvent {
@@ -29,24 +30,31 @@ fn now_secs() -> f64 {
 
 /// Reads the append-only task log and returns the latest line per taskId
 /// (cron refires and retries append new lines over time).
-fn read_deduped_tasks(tasks_path: &str) -> HashMap<String, Value> {
+fn read_deduped_tasks_multiple(tasks_paths: &[String]) -> HashMap<String, Value> {
     let mut tasks_map: HashMap<String, Value> = HashMap::new();
-    let file = match std::fs::File::open(tasks_path) {
-        Ok(f) => f,
-        Err(_) => return tasks_map,
-    };
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(t) = serde_json::from_str::<Value>(&line) {
-            if let Some(tid) = t.get("taskId").and_then(|v| v.as_str()) {
-                tasks_map.insert(tid.to_string(), t);
+    for tasks_path in tasks_paths {
+        let file = match std::fs::File::open(tasks_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(t) = serde_json::from_str::<Value>(&line) {
+                if let Some(tid) = t.get("taskId").and_then(|v| v.as_str()) {
+                    tasks_map.insert(tid.to_string(), t);
+                }
             }
         }
     }
     tasks_map
 }
+
+fn read_deduped_tasks(tasks_path: &str) -> HashMap<String, Value> {
+    read_deduped_tasks_multiple(&[tasks_path.to_string()])
+}
+
 
 fn has_job_error(t: &Value) -> bool {
     // Tolerate the lowercase variant in case logs were written by older builds
@@ -82,8 +90,8 @@ fn dashboard_status(t: &Value) -> &'static str {
     "queued"
 }
 
-fn stats_body(tasks_path: &str) -> String {
-    let tasks_map = read_deduped_tasks(tasks_path);
+fn stats_body_multiple(tasks_paths: &[String]) -> String {
+    let tasks_map = read_deduped_tasks_multiple(tasks_paths);
     let enqueued = tasks_map.len();
     let mut processed = 0usize;
     let mut failed = 0usize;
@@ -103,8 +111,12 @@ fn stats_body(tasks_path: &str) -> String {
     )
 }
 
-fn tasks_body(tasks_path: &str) -> String {
-    let tasks_map = read_deduped_tasks(tasks_path);
+fn stats_body(tasks_path: &str) -> String {
+    stats_body_multiple(&[tasks_path.to_string()])
+}
+
+fn tasks_body_multiple(tasks_paths: &[String]) -> String {
+    let tasks_map = read_deduped_tasks_multiple(tasks_paths);
     let res: Vec<Value> = tasks_map
         .values()
         .map(|t| {
@@ -125,6 +137,10 @@ fn tasks_body(tasks_path: &str) -> String {
     serde_json::to_string(&res).unwrap_or_else(|_| "[]".to_string())
 }
 
+fn tasks_body(tasks_path: &str) -> String {
+    tasks_body_multiple(&[tasks_path.to_string()])
+}
+
 fn progress_body(ring: &ProgressRing) -> String {
     let events: Vec<Value> = {
         let r = ring.lock().unwrap();
@@ -143,7 +159,7 @@ fn progress_body(ring: &ProgressRing) -> String {
     serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn handle_connection(mut stream: TcpStream, tasks_path: &str, ring: &ProgressRing) {
+fn handle_connection(mut stream: TcpStream, tasks_paths: &[String], ring: &ProgressRing) {
     let mut buf = [0u8; 4096];
     let n = match stream.read(&mut buf) {
         Ok(n) if n > 0 => n,
@@ -164,8 +180,8 @@ fn handle_connection(mut stream: TcpStream, tasks_path: &str, ring: &ProgressRin
         )
     } else {
         match path {
-            "/api/stats" => ("200 OK", "application/json", stats_body(tasks_path)),
-            "/api/tasks" => ("200 OK", "application/json", tasks_body(tasks_path)),
+            "/api/stats" => ("200 OK", "application/json", stats_body_multiple(tasks_paths)),
+            "/api/tasks" => ("200 OK", "application/json", tasks_body_multiple(tasks_paths)),
             "/api/progress" => ("200 OK", "application/json", progress_body(ring)),
             "/" => match std::fs::read_to_string("static/index.html") {
                 Ok(html) => ("200 OK", "text/html", html),
@@ -248,9 +264,69 @@ impl SnerdQueue {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if let Ok(stream) = stream {
-                    let path = tasks_path.clone();
+                    let path = vec![tasks_path.clone()];
                     let r = Arc::clone(&ring);
                     std::thread::spawn(move || handle_connection(stream, &path, &r));
+                }
+            }
+        });
+    }
+}
+
+impl SnerdShardedQueue {
+    pub fn start_dashboard(&self, port: u16) {
+        let ring: ProgressRing = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAP)));
+        let mut rx = self.subscribe_progress();
+        let feeder_ring = Arc::clone(&ring);
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            rt.block_on(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(msg) => {
+                            let mut r = feeder_ring.lock().unwrap();
+                            r.push_back(ProgressEvent {
+                                ts: now_secs(),
+                                task_id: msg.task_id,
+                                data: msg.data,
+                            });
+                            if r.len() > RING_CAP {
+                                r.pop_front();
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        });
+
+        let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("[Snerd] Failed to start dashboard on port {}: {}", port, e);
+                return;
+            }
+        };
+
+        println!("[Snerd] Dashboard running on http://localhost:{}", port);
+        
+        let sq = self.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            for stream in listener.incoming() {
+                if let Ok(stream) = stream {
+                    let r = Arc::clone(&ring);
+                    // Fetch all paths for owned shards
+                    let paths = rt.block_on(async {
+                        let shards = sq.get_shards().await;
+                        shards.values().map(|q| q.file_store.file_path().to_string_lossy().to_string()).collect::<Vec<_>>()
+                    });
+                    
+                    std::thread::spawn(move || handle_connection(stream, &paths, &r));
                 }
             }
         });
