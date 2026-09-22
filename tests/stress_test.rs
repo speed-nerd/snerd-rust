@@ -41,7 +41,7 @@ async fn test_embedded_stress_50k() {
             format!("{{\"id\":{}}}", i),
             3,
             0.0,
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None,
         );
         queue.enqueue(task).unwrap();
     }

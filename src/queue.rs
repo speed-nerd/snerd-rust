@@ -57,12 +57,12 @@ pub struct SnerdQueue {
     /// mapped to their completion time. Final safety net to prevent duplicate
     /// execution; entries are evicted after COMPLETED_TTL to bound memory.
     completed_tasks: Arc<Mutex<HashMap<String, Instant>>>,
-    worker_semaphore: Arc<Semaphore>,
+    worker_pools: Arc<HashMap<String, Arc<Semaphore>>>,
     pub progress_tx: broadcast::Sender<ProgressMessage>,
-    /// Shared priority queue — workers always pop the highest-priority task next.
-    shared_pq: Arc<Mutex<BinaryHeap<PriorityTask>>>,
-    /// Number of active dispatcher loops (prevents duplicates).
-    dispatcher_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Shared priority queues per pool
+    shared_pqs: Arc<Mutex<HashMap<String, BinaryHeap<PriorityTask>>>>,
+    /// Number of active dispatcher loops per pool
+    dispatcher_counts: Arc<Mutex<HashMap<String, usize>>>,
     /// Exclusive OS-level lock on the task log, held for the queue's lifetime.
     /// Guarantees a single processor per storage file. Never read directly;
     /// keeping the handle alive is what keeps the lock held.
@@ -71,6 +71,12 @@ pub struct SnerdQueue {
 
 impl SnerdQueue {
     pub fn new(name: &str, file_store: FileStore, rate_limiter: RateLimiter) -> Self {
+        let mut pools = HashMap::new();
+        pools.insert("default".to_string(), 100);
+        Self::new_with_pools(name, file_store, rate_limiter, pools)
+    }
+
+    pub fn new_with_pools(name: &str, file_store: FileStore, rate_limiter: RateLimiter, pools: HashMap<String, usize>) -> Self {
         // Acquire exclusive ownership of the task log before anything else.
         // Two processors on the same file would race and double-execute tasks,
         // so a second queue on the same storage fails fast instead. The OS
@@ -120,6 +126,24 @@ impl SnerdQueue {
             }
         }
 
+        let mut worker_pools = HashMap::new();
+        let mut has_default = false;
+        let mut shared_pqs = HashMap::new();
+        let mut dispatcher_counts = HashMap::new();
+        for (pool_name, capacity) in pools {
+            worker_pools.insert(pool_name.clone(), Arc::new(Semaphore::new(capacity)));
+            shared_pqs.insert(pool_name.clone(), BinaryHeap::new());
+            dispatcher_counts.insert(pool_name.clone(), 0);
+            if pool_name == "default" {
+                has_default = true;
+            }
+        }
+        if !has_default {
+            worker_pools.insert("default".to_string(), Arc::new(Semaphore::new(100)));
+            shared_pqs.insert("default".to_string(), BinaryHeap::new());
+            dispatcher_counts.insert("default".to_string(), 0);
+        }
+
         let (progress_tx, _) = broadcast::channel(1024);
         Self {
             name: name.to_string(),
@@ -131,10 +155,10 @@ impl SnerdQueue {
             executing_tasks: Arc::new(Mutex::new(HashSet::new())),
             queued_tasks: Arc::new(Mutex::new(HashSet::new())),
             completed_tasks: Arc::new(Mutex::new(HashMap::new())),
-            worker_semaphore: Arc::new(Semaphore::new(100)), // Limit to 100 concurrent tasks
+            worker_pools: Arc::new(worker_pools),
             progress_tx,
-            shared_pq: Arc::new(Mutex::new(BinaryHeap::new())),
-            dispatcher_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shared_pqs: Arc::new(Mutex::new(shared_pqs)),
+            dispatcher_counts: Arc::new(Mutex::new(dispatcher_counts)),
             _storage_lock: Arc::new(lock_file),
         }
     }
@@ -227,8 +251,9 @@ impl SnerdQueue {
         // IMPORTANT: Check against LIVE executing_tasks and queued_tasks sets
         // (not snapshots) to prevent races where a task moves from queued → executing
         // between our snapshot and our check, making it invisible to both.
+        let mut pools_to_dispatch = Vec::new();
         {
-            let mut pq = self.shared_pq.lock().unwrap();
+            let mut pqs = self.shared_pqs.lock().unwrap();
             let mut queued = self.queued_tasks.lock().unwrap();
             let executing = self.executing_tasks.lock().unwrap();
             for task in tasks {
@@ -238,16 +263,30 @@ impl SnerdQueue {
                     && !executing.contains(&task.task_id)
                     && !queued.contains(&task.task_id)
                 {
-                    queued.insert(task.task_id.clone());
-                    pq.push(PriorityTask(task));
+                    let pool_name = task.pool.clone().unwrap_or_else(|| "default".to_string());
+                    if let Some(pq) = pqs.get_mut(&pool_name) {
+                        queued.insert(task.task_id.clone());
+                        pq.push(PriorityTask(task));
+                        pools_to_dispatch.push(pool_name);
+                    } else if let Some(pq) = pqs.get_mut("default") {
+                        queued.insert(task.task_id.clone());
+                        pq.push(PriorityTask(task));
+                        pools_to_dispatch.push("default".to_string());
+                    }
                 }
             }
         }
 
-        // Start a priority dispatcher if there are tasks queued and not too many dispatchers
-        let pq_len = self.shared_pq.lock().unwrap().len();
-        if pq_len > 0 && self.dispatcher_count.load(std::sync::atomic::Ordering::Relaxed) < 2 {
-            self.spawn_dispatcher();
+        // Start a priority dispatcher for pools with tasks and not too many dispatchers
+        pools_to_dispatch.sort();
+        pools_to_dispatch.dedup();
+        for pool_name in pools_to_dispatch {
+            let mut counts = self.dispatcher_counts.lock().unwrap();
+            let count = counts.entry(pool_name.clone()).or_insert(0);
+            if *count < 2 {
+                *count += 1;
+                self.spawn_dispatcher(pool_name);
+            }
         }
     }
 
@@ -256,21 +295,33 @@ impl SnerdQueue {
     /// for each task, ensuring at most 100 concurrent executions. When a task
     /// completes and releases its permit, the dispatcher wakes up and spawns
     /// the next highest-priority task.
-    fn spawn_dispatcher(&self) {
-        self.dispatcher_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn spawn_dispatcher(&self, pool_name: String) {
         let q = self.clone();
+        let pool_name_clone = pool_name.clone();
         tokio::spawn(async move {
+            let semaphore = match q.worker_pools.get(&pool_name_clone) {
+                Some(s) => s.clone(),
+                None => {
+                    let mut counts = q.dispatcher_counts.lock().unwrap();
+                    if let Some(c) = counts.get_mut(&pool_name_clone) { *c -= 1; }
+                    return;
+                }
+            };
             loop {
-                // Acquire a concurrency permit (blocks if all 100 are in use)
-                let permit = match q.worker_semaphore.clone().acquire_owned().await {
+                // Acquire a concurrency permit
+                let permit = match semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(_) => break,
                 };
 
-                // Pop the highest-priority task from the shared queue
+                // Pop the highest-priority task from the specific pool's priority queue
                 let task = {
-                    let mut pq = q.shared_pq.lock().unwrap();
-                    pq.pop()
+                    let mut pqs = q.shared_pqs.lock().unwrap();
+                    if let Some(pq) = pqs.get_mut(&pool_name_clone) {
+                        pq.pop()
+                    } else {
+                        None
+                    }
                 };
 
                 match task {
@@ -316,7 +367,10 @@ impl SnerdQueue {
                     }
                 }
             }
-            q.dispatcher_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let mut counts = q.dispatcher_counts.lock().unwrap();
+            if let Some(c) = counts.get_mut(&pool_name_clone) {
+                *c -= 1;
+            }
         });
     }
 

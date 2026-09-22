@@ -36,14 +36,15 @@ async fn test_rate_limiting() {
             "{}".to_string(),
             3,
             1.0,
-            Some("openai_api".to_string()),
-            Some(2),
+            Some("openai_api".to_string()), // rateLimitGroup
+            Some(2),                        // maxPerMinute (2 per minute)
             None,
             None,
             None,
             None,
-            None, // webhook_url
+            None,
             None, // max_execution_seconds
+            None, // pool
         );
         queue.enqueue(task).unwrap();
     }
