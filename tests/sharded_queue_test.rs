@@ -24,13 +24,13 @@ async fn test_sharded_queue_basic() {
         "task-1".to_string(),
         "my_task".to_string(),
         "{}".to_string(),
-        1, 1.0, None, None, None, None, None, None, None, None, None
+        1, 1.0, None, None, None, None, None, None, None, None, None, None
     );
     let t2 = RetryableTask::new(
         "task-2".to_string(),
         "my_task".to_string(),
         "{}".to_string(),
-        1, 1.0, None, None, None, None, None, None, None, None, None
+        1, 1.0, None, None, None, None, None, None, None, None, None, None
     );
 
     q.enqueue(t1).await.unwrap();

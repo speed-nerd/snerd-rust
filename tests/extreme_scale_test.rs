@@ -86,7 +86,7 @@ async fn run_scale_test(num_jobs: usize, label: &str) -> bool {
             format!("{}", i),  // simple data = task index
             3,
             0.0,
-            None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None,
         );
         queue.enqueue(task).unwrap();
 

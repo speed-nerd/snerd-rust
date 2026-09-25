@@ -140,6 +140,35 @@ impl FileStore {
         Ok(cache.get(task_id).cloned())
     }
 
+    pub fn are_tasks_completed(&self, task_ids: &[String]) -> bool {
+        let cache = self.tasks_cache.read().unwrap();
+        task_ids.iter().all(|id| !cache.contains_key(id))
+    }
+
+    pub fn detect_cycle(&self, new_task_id: &str, trigger_after_ids: &[String]) -> Result<(), String> {
+        let cache = self.tasks_cache.read().unwrap();
+        
+        let mut visited = std::collections::HashSet::new();
+        let mut stack: Vec<String> = trigger_after_ids.to_vec();
+
+        while let Some(current_id) = stack.pop() {
+            if current_id == new_task_id {
+                return Err(format!("Cycle detected involving task {}", new_task_id));
+            }
+            if !visited.insert(current_id.clone()) {
+                continue;
+            }
+            if let Some(task) = cache.get(&current_id) {
+                if let Some(ref deps) = task.trigger_after_ids {
+                    for dep in deps {
+                        stack.push(dep.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete_task(&self, task_id: &str) -> std::io::Result<()> {
         let mut task_opt = None;
         {

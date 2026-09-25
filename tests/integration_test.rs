@@ -33,6 +33,7 @@ async fn test_file_store_lifecycle() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
 
     // Test Save
@@ -94,6 +95,7 @@ async fn test_queue_execution() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
 
     queue.enqueue(task).unwrap();
@@ -149,6 +151,7 @@ async fn test_queue_retry_and_max() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
 
     queue.enqueue(task).unwrap();
@@ -209,6 +212,7 @@ async fn test_concurrent_writes() {
                 None, // webhook_url
                 None, // max_execution_seconds
                 None, // pool
+                None, // trigger_after_ids
             );
             store_clone.save_task(&task).unwrap();
         }));
@@ -255,6 +259,7 @@ async fn test_corrupted_file_recovery() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
     store.save_task(&task).unwrap();
 
@@ -297,6 +302,7 @@ async fn test_delayed_execution() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
 
     // Artificially set the retry time to the future, as new tasks execute immediately by default
@@ -350,6 +356,7 @@ async fn test_cron_rescheduling() {
         None, // webhook_url
         None, // max_execution_seconds
         None, // pool
+        None, // trigger_after_ids
     );
     
     // Hack execute_at to be now so it runs immediately the first time

@@ -60,7 +60,7 @@ async fn main() {
             "progress-task-1".to_string(),
             "progress-task".to_string(),
             r#"{"job":"demo"}"#.to_string(),
-            2, 0.0, None, None, None, None, None, None, None, None, None,
+            2, 0.0, None, None, None, None, None, None, None, None, None, None,
         ))
         .unwrap();
 
@@ -70,7 +70,7 @@ async fn main() {
             "fail-task-1".to_string(),
             "fail-task".to_string(),
             "{}".to_string(),
-            1, 0.0001, None, None, None, None, None, None, None, None, None,
+            1, 0.0001, None, None, None, None, None, None, None, None, None, None,
         ))
         .unwrap();
 
@@ -81,7 +81,7 @@ async fn main() {
             "future-task-1".to_string(),
             "progress-task".to_string(),
             "{}".to_string(),
-            1, 0.0, None, None, None, None, Some(future), None, None, None, None,
+            1, 0.0, None, None, None, None, Some(future), None, None, None, None, None,
         ))
         .unwrap();
 
@@ -93,7 +93,7 @@ async fn main() {
             "{}".to_string(),
             2, 0.0, None, None, None, None, None,
             Some("*/10 * * * * *".to_string()),
-            None, None, None,
+            None, None, None, None,
         ))
         .unwrap();
 
@@ -107,6 +107,7 @@ async fn main() {
             Some("http://localhost:9010/webhook-ok".to_string()),
             None,
             None,
+            None,
         ))
         .unwrap();
 
@@ -118,6 +119,7 @@ async fn main() {
             "{}".to_string(),
             1, 0.0005, None, None, None, None, None, None, None,
             Some(2),
+            None,
             None,
         ))
         .unwrap();

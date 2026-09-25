@@ -203,6 +203,12 @@ impl SnerdQueue {
                 hashes.insert(hash.clone());
             }
         }
+        if let Some(ref deps) = task.trigger_after_ids {
+            if let Err(e) = self.file_store.detect_cycle(&task.task_id, deps) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+            }
+        }
+        
         task.deleted_at = None;
         self.file_store.save_task(&task)?;
 
@@ -257,6 +263,12 @@ impl SnerdQueue {
             let mut queued = self.queued_tasks.lock().unwrap();
             let executing = self.executing_tasks.lock().unwrap();
             for task in tasks {
+                if let Some(ref dep_ids) = task.trigger_after_ids {
+                    if !self.file_store.are_tasks_completed(dep_ids) {
+                        continue;
+                    }
+                }
+
                 if task.execute_at <= now
                     && task.retry_after_time <= now
                     && task.deleted_at.is_none()
@@ -490,7 +502,30 @@ impl SnerdQueue {
                     task.update_retry_config(Some(e));
                     let _ = self.file_store.save_task(&task);
                 } else {
-                    // Max retries reached — fire DLQ webhook or local max retry handler
+                    // Max retries reached
+
+                    // --- Option A: Mark children as failed ---
+                    let children_to_fail = {
+                        let mut kids = Vec::new();
+                        if let Ok(all_active) = self.file_store.read_tasks() {
+                            for t in all_active {
+                                if let Some(ref deps) = t.trigger_after_ids {
+                                    if deps.contains(&task.task_id) {
+                                        kids.push(t);
+                                    }
+                                }
+                            }
+                        }
+                        kids
+                    };
+                    for mut child in children_to_fail {
+                        child.update_retry_config(Some(format!("blocked_by_failed_parent: {}", task.task_id)));
+                        child.mark_deleted();
+                        let _ = self.file_store.save_task(&child);
+                    }
+                    // ------------------------------------------
+
+                    // fire DLQ webhook or local max retry handler
                     if let Some(ref url) = task.webhook_url.clone() {
                         let payload = json!({
                             "taskId": task.task_id,

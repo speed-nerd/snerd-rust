@@ -43,12 +43,13 @@ async fn test_worker_pools_isolation() {
     }).await;
 
     // Enqueue long-running default task
-    let mut default_task = RetryableTask::new(
+    let default_task = RetryableTask::new(
         "t-def-1".to_string(),
         "LONG_TASK".to_string(),
         "default".to_string(),
         1,
         0.0,
+        None,
         None,
         None,
         None,
@@ -70,7 +71,7 @@ async fn test_worker_pools_isolation() {
     }
 
     // Enqueue urgent task with pool="urgent"
-    let mut urgent_task = RetryableTask::new(
+    let urgent_task = RetryableTask::new(
         "t-urg-1".to_string(),
         "LONG_TASK".to_string(),
         "urgent".to_string(),
@@ -85,6 +86,7 @@ async fn test_worker_pools_isolation() {
         None,
         None,
         Some("urgent".to_string()),
+        None,
     );
     queue.enqueue(urgent_task).unwrap();
 

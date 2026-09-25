@@ -79,6 +79,9 @@ pub struct RetryableTask {
     #[serde(rename = "pool", skip_serializing_if = "Option::is_none")]
     pub pool: Option<String>,
 
+    #[serde(rename = "triggerAfterIds", skip_serializing_if = "Option::is_none")]
+    pub trigger_after_ids: Option<Vec<String>>,
+
     #[serde(skip, default = "Utc::now")]
     pub created_at: DateTime<Utc>,
 
@@ -102,6 +105,7 @@ impl RetryableTask {
         webhook_url: Option<String>,
         max_execution_seconds: Option<u64>,
         pool: Option<String>,
+        trigger_after_ids: Option<Vec<String>>,
     ) -> Self {
         let now = Utc::now();
 
@@ -153,6 +157,7 @@ impl RetryableTask {
             webhook_url,
             max_execution_seconds,
             pool,
+            trigger_after_ids,
             created_at: now,
             updated_at: now,
         }

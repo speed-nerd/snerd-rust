@@ -45,6 +45,7 @@ async fn test_rate_limiting() {
             None,
             None, // max_execution_seconds
             None, // pool
+            None, // trigger_after_ids
         );
         queue.enqueue(task).unwrap();
     }
