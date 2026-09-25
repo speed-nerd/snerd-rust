@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./assets/Designer-9.png" height="120" alt="Snerd-Rust Logo" />
-  <h1>⚙️ snerd-rust v0.2.5</h1>
+  <h1>⚙️ snerd-rust v0.3.0</h1>
   <p>A blazingly fast, brutally simple, zero-infrastructure async background job engine for Rust.</p>
 
   [![Crates.io](https://img.shields.io/crates/v/snerd-rust.svg)](https://crates.io/crates/snerd-rust)
@@ -30,6 +30,9 @@ No databases. No external daemons. No nonsense.
 * **Progress Streaming**: Handlers can emit live progress events that stream straight into the dashboard.
 * **Asynchronous Tokio Core**: Built natively on top of `tokio`. Background workers process the queue without starving your main event loop.
 * **Dead-Letter Queue (DLQ)**: Built-in `max_retries` limits and hooks to elegantly catch and bury poison-pill tasks.
+* **Sharded Queues**: Distribute load across multiple queue nodes safely using file-backed lock sharding.
+* **Worker Pools**: Prevent slow tasks from starving fast tasks by dedicating workers to specific pools.
+* **Job Chaining**: Sequence tasks as DAGs using `trigger_after_ids`.
 
 ---
 
@@ -39,7 +42,7 @@ Just add `snerd-rust` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-snerd-rust = "0.2.5"
+snerd-rust = "0.3.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -98,6 +101,8 @@ async fn main() {
         None,                             // cron
         None,                             // webhook_url
         None,                             // max_execution_seconds
+        None,                             // pool
+        None,                             // trigger_after_ids
     );
     queue.enqueue(task).unwrap();
 
@@ -127,6 +132,8 @@ let task = RetryableTask::new(
     Some("1h".to_string()),                   // cron — runs every 1 hour
     None,                                     // webhook_url
     Some(300),                                // max_execution_seconds
+    Some("urgent".to_string()),               // pool
+    Some(vec!["parent-job-123".to_string()]), // trigger_after_ids
 );
 ```
 
@@ -142,6 +149,8 @@ let task = RetryableTask::new(
 | `cron` | `Option<String>` | `None` | A cron expression for recurring jobs: standard 5-field (`"0 * * * *"`), 6-field with seconds (`"*/10 * * * * *"`), or shorthands `"30s"`, `"10m"`, `"2h"`, `"1d"`. |
 | `webhook_url` | `Option<String>` | `None` | Optional webhook URL — the payload is dispatched via HTTP POST instead of a local handler. |
 | `max_execution_seconds` | `Option<u64>` | `None` | Optional hard timeout in seconds (see below). |
+| `pool` | `Option<String>` | `None` | Dedicate this task to a specific worker pool (e.g. `"urgent"`). Use `SnerdQueue::new_with_pools` to allocate workers per pool. |
+| `trigger_after_ids` | `Option<Vec<String>>` | `None` | Wait for other tasks (by `task_id`) to successfully complete before executing this task. |
 
 ### ⏱️ Note on Hard Timeouts (`max_execution_seconds`)
 When `max_execution_seconds` is provided, the engine wraps the execution in a `tokio::time::timeout`. If the task takes longer than the timeout, the engine cancels the task, frees up the worker slot, and marks the execution as failed (it will be retried if `max_retries` allows).
@@ -258,13 +267,13 @@ async fn main() {
     queue.enqueue(RetryableTask::new(
         "img-1".to_string(), "process_image".to_string(),
         r#"{"image_id": "abc123"}"#.to_string(),
-        3, 0.5, None, None, None, None, None, None, None, None,
+        3, 0.5, None, None, None, None, None, None, None, None, None, None,
     )).unwrap();
 
     queue.enqueue(RetryableTask::new(
         "otp-1".to_string(), "send_otp_email".to_string(),
         r#"{"to": "john@wick.com"}"#.to_string(),
-        3, 0.5, None, None, None, None, None, None, None, None,
+        3, 0.5, None, None, None, None, None, None, None, None, None, None,
     )).unwrap();
 
     // ONE dashboard shows every job type
