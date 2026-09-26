@@ -20,6 +20,10 @@ pub struct SnerdShardedQueue {
     pub progress_tx: broadcast::Sender<ProgressMessage>,
     task_handlers: Arc<RwLock<HashMap<String, TaskHandler>>>,
     max_retry_handlers: Arc<RwLock<HashMap<String, MaxRetryHandler>>>,
+    pub stop_flag: Arc<std::sync::atomic::AtomicBool>,
+    worker_pools: Arc<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    shared_pqs: Arc<std::sync::Mutex<HashMap<String, std::collections::BinaryHeap<crate::task::PriorityTask>>>>,
+    dispatcher_counts: Arc<std::sync::Mutex<HashMap<String, usize>>>,
 }
 
 impl SnerdShardedQueue {
@@ -33,6 +37,13 @@ impl SnerdShardedQueue {
 
         let (progress_tx, _) = broadcast::channel(1024);
         
+        let mut worker_pools = HashMap::new();
+        worker_pools.insert("default".to_string(), Arc::new(tokio::sync::Semaphore::new(100)));
+        let mut shared_pqs = HashMap::new();
+        shared_pqs.insert("default".to_string(), std::collections::BinaryHeap::new());
+        let mut dispatcher_counts = HashMap::new();
+        dispatcher_counts.insert("default".to_string(), 0);
+
         let sq = Self {
             name: name.to_string(),
             dir: dir.clone(),
@@ -40,6 +51,10 @@ impl SnerdShardedQueue {
             progress_tx,
             task_handlers: Arc::new(RwLock::new(HashMap::new())),
             max_retry_handlers: Arc::new(RwLock::new(HashMap::new())),
+            stop_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker_pools: Arc::new(worker_pools),
+            shared_pqs: Arc::new(std::sync::Mutex::new(shared_pqs)),
+            dispatcher_counts: Arc::new(std::sync::Mutex::new(dispatcher_counts)),
         };
 
         sq.start_membership_heartbeat(total_shards).await;
@@ -112,6 +127,9 @@ impl SnerdShardedQueue {
         tokio::spawn(async move {
             let store = MembershipStore::new(&dir);
             loop {
+                if sq.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let now = Utc::now();
                 let skew = skew_margin();
                 let mut current_owned = Vec::new();
@@ -169,7 +187,14 @@ impl SnerdShardedQueue {
         // and we drop our `_lock` right before creating `SnerdQueue`.
         drop(_lock);
 
-        let queue = SnerdQueue::new(&self.name, file_store, rate_limiter);
+        let queue = SnerdQueue::new_with_shared_pools(
+            &self.name,
+            file_store,
+            rate_limiter,
+            Arc::clone(&self.worker_pools),
+            Arc::clone(&self.shared_pqs),
+            Arc::clone(&self.dispatcher_counts),
+        );
         
         // Wire up progress events
         let mut rx = queue.subscribe_progress();
@@ -214,5 +239,15 @@ impl SnerdShardedQueue {
                 println!("[Snerd] Lost lease for {}, stopped engine.", shard);
             }
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut shards = self.shards.write().await;
+        for (shard, queue) in shards.iter() {
+            queue.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            println!("[Snerd] Shutdown: released {}", shard);
+        }
+        shards.clear();
     }
 }

@@ -10,6 +10,8 @@
   [![Docs](https://img.shields.io/badge/docs-speed--nerd.github.io-blue)](https://speed-nerd.github.io/docs/)
 </div>
 
+> 📝 **What's New in v0.3.0?** Check out the [Changelog & Releases](https://speed-nerd.github.io/docs/changelog) for the latest features including Sharded Queues, Worker Pools, and Job Chaining!
+
 If you are tired of wrestling with heavy, bloated background job frameworks like Redis, Postgres tables, or RabbitMQ just to send a few emails in the background... well, you are in the right place.
 
 `snerd-rust` is an embedded, high-performance background task queue that lives entirely in a single, perfectly OS-locked, append-only `.log` file on your file system. It was designed to bring the aggressive concurrency and lightweight footprint of Golang's `snerd` over to Rust's heavily optimized asynchronous ecosystem.
@@ -334,6 +336,42 @@ let file_store = FileStore::new("/var/data/snerd/tasks.log").unwrap();
 ```
 
 A shared network drive (AWS EFS or NFS) is still a good home for that log when a single instance needs durable storage — e.g. a container that restarts but must keep its queue state. OS-level file locking keeps writes safe.
+
+### 🍕 Embedded Sharding (Multi-Process Scaling)
+
+If you have multiple instances of your Rust app running on the **same machine** (e.g., behind a local load balancer) and you want them to share the processing load, you can use the built-in **Sharded Queue**. This transparently partitions tasks across multiple `.log` files and coordinates lease-based ownership via a background heartbeat.
+
+```rust
+use snerd_rust::sharded_queue::SnerdShardedQueue;
+use snerd_rust::task::RetryableTask;
+use std::path::Path;
+
+#[tokio::main]
+async fn main() {
+    // 1. Create a Sharded Queue requesting 4 partitions
+    let sharded = SnerdShardedQueue::new("main", Path::new(".snerdata"), 4).await;
+    
+    // 2. Register handlers as normal (they replicate to all owned shards)
+    sharded.register_task_handler("process_image", |data| {
+        println!("Processing: {}", data);
+        Ok(())
+    }).await;
+    
+    // 3. Enqueue tasks (they are FNV-1a hashed to a specific shard)
+    let task = RetryableTask::new("id-1".into(), "process_image".into(), "{}".into(), 3, 1.0, None, None, None, None, None, None, None, None, None, None);
+    sharded.enqueue(task).await.unwrap();
+    
+    // 4. Start the dashboard (it aggregates all owned shards!)
+    sharded.start_dashboard(9090);
+
+    // 5. Gracefully shutdown and release the OS file locks on exit
+    // sharded.shutdown().await;
+}
+```
+
+> **Note:** We strongly recommend keeping sharded processes on a single physical machine with a local disk. Using embedded sharding across NFS/EFS is not officially supported due to clock drift and unreliable `flock` implementations over network mounts.
+
+> **Concurrency Limits:** `SnerdShardedQueue` automatically uses a **Shared Worker Pool**. If you request 10 shards, the engine will still strictly enforce your maximum concurrency limits (default: 100 concurrent workers) process-wide, dynamically shifting workers to whichever shard has due tasks.
 
 ---
 

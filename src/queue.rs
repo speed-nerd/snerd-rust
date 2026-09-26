@@ -63,10 +63,8 @@ pub struct SnerdQueue {
     shared_pqs: Arc<Mutex<HashMap<String, BinaryHeap<PriorityTask>>>>,
     /// Number of active dispatcher loops per pool
     dispatcher_counts: Arc<Mutex<HashMap<String, usize>>>,
-    /// Exclusive OS-level lock on the task log, held for the queue's lifetime.
-    /// Guarantees a single processor per storage file. Never read directly;
-    /// keeping the handle alive is what keeps the lock held.
     _storage_lock: Arc<File>,
+    pub stop_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SnerdQueue {
@@ -77,10 +75,42 @@ impl SnerdQueue {
     }
 
     pub fn new_with_pools(name: &str, file_store: FileStore, rate_limiter: RateLimiter, pools: HashMap<String, usize>) -> Self {
-        // Acquire exclusive ownership of the task log before anything else.
-        // Two processors on the same file would race and double-execute tasks,
-        // so a second queue on the same storage fails fast instead. The OS
-        // releases the lock automatically when the file is closed/exits.
+        let mut worker_pools = HashMap::new();
+        let mut has_default = false;
+        let mut shared_pqs = HashMap::new();
+        let mut dispatcher_counts = HashMap::new();
+        for (pool_name, capacity) in pools {
+            worker_pools.insert(pool_name.clone(), Arc::new(Semaphore::new(capacity)));
+            shared_pqs.insert(pool_name.clone(), BinaryHeap::new());
+            dispatcher_counts.insert(pool_name.clone(), 0);
+            if pool_name == "default" {
+                has_default = true;
+            }
+        }
+        if !has_default {
+            worker_pools.insert("default".to_string(), Arc::new(Semaphore::new(100)));
+            shared_pqs.insert("default".to_string(), BinaryHeap::new());
+            dispatcher_counts.insert("default".to_string(), 0);
+        }
+
+        Self::new_with_shared_pools(
+            name,
+            file_store,
+            rate_limiter,
+            Arc::new(worker_pools),
+            Arc::new(Mutex::new(shared_pqs)),
+            Arc::new(Mutex::new(dispatcher_counts)),
+        )
+    }
+
+    pub fn new_with_shared_pools(
+        name: &str,
+        file_store: FileStore,
+        rate_limiter: RateLimiter,
+        worker_pools: Arc<HashMap<String, Arc<Semaphore>>>,
+        shared_pqs: Arc<Mutex<HashMap<String, BinaryHeap<PriorityTask>>>>,
+        dispatcher_counts: Arc<Mutex<HashMap<String, usize>>>,
+    ) -> Self {
         let log_path = file_store.file_path().to_path_buf();
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -126,24 +156,6 @@ impl SnerdQueue {
             }
         }
 
-        let mut worker_pools = HashMap::new();
-        let mut has_default = false;
-        let mut shared_pqs = HashMap::new();
-        let mut dispatcher_counts = HashMap::new();
-        for (pool_name, capacity) in pools {
-            worker_pools.insert(pool_name.clone(), Arc::new(Semaphore::new(capacity)));
-            shared_pqs.insert(pool_name.clone(), BinaryHeap::new());
-            dispatcher_counts.insert(pool_name.clone(), 0);
-            if pool_name == "default" {
-                has_default = true;
-            }
-        }
-        if !has_default {
-            worker_pools.insert("default".to_string(), Arc::new(Semaphore::new(100)));
-            shared_pqs.insert("default".to_string(), BinaryHeap::new());
-            dispatcher_counts.insert("default".to_string(), 0);
-        }
-
         let (progress_tx, _) = broadcast::channel(1024);
         Self {
             name: name.to_string(),
@@ -155,11 +167,12 @@ impl SnerdQueue {
             executing_tasks: Arc::new(Mutex::new(HashSet::new())),
             queued_tasks: Arc::new(Mutex::new(HashSet::new())),
             completed_tasks: Arc::new(Mutex::new(HashMap::new())),
-            worker_pools: Arc::new(worker_pools),
+            worker_pools,
             progress_tx,
-            shared_pqs: Arc::new(Mutex::new(shared_pqs)),
-            dispatcher_counts: Arc::new(Mutex::new(dispatcher_counts)),
+            shared_pqs,
+            dispatcher_counts,
             _storage_lock: Arc::new(lock_file),
+            stop_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -226,6 +239,9 @@ impl SnerdQueue {
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
             loop {
+                if q.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 interval_timer.tick().await;
                 q.process_due_tasks().await;
             }
