@@ -406,3 +406,73 @@ If your file ever grows too large (default `20MB` or >10k operations), `snerd-ru
 ## 🤝 License
 
 MIT License. Do whatever you want with it, just don't let your tasks die unhandled.
+
+
+## Advanced Orchestration (v0.3.0 Features)
+
+SnerdMQ v0.3.0 introduced powerful new primitives for managing complex background jobs natively in the core engine. Below are examples of how to utilize these features when embedding SnerdMQ in Rust:
+
+### 🍕 Sharded Queues (Scaling Out)
+
+SnerdMQ natively supports distributed execution across multiple servers while acting as a single logical queue. Just mount a shared storage drive (like AWS EFS) and boot multiple daemons. They will automatically lock and negotiate ownership of shards. Just tell the queue how many shards to claim on boot.
+
+```rust
+// Boot a multi-tenant daemon that owns up to 4 shards locally
+let queue = Arc::new(SnerdQueue::new("my-queue", file_store, rate_limiter));
+```
+
+### 🏊 Worker Pools
+
+```rust
+// Route an AI task to a dedicated pool
+let mut task = RetryableTask::new("ai-1", "ai_generation", r#"{"prompt":"horse"}"#.to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+task.pool = Some("ai-pool".to_string());
+queue.enqueue(task)?;
+
+// Route an email task to a fast, urgent pool
+let mut task2 = RetryableTask::new("email-1", "send_email", r#"{"to":"user@a.com"}"#.to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+task2.pool = Some("urgent".to_string());
+queue.enqueue(task2)?;
+```
+
+### 🔗 Job Chaining (DAGs)
+
+```rust
+// Step 1: Transcode
+queue.enqueue(RetryableTask::new("transcode-1", "transcode_video", r#"{"file":"raw.mp4"}"#.to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None))?;
+
+// Step 2: Upload (Waits for Step 1)
+let mut next_task = RetryableTask::new("upload-1", "upload_s3", r#"{"file":"out.mp4"}"#.to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+next_task.trigger_after_ids = Some(vec!["transcode-1".to_string()]);
+queue.enqueue(next_task)?;
+```
+
+### 🕒 Cron & Scheduled Jobs
+
+```rust
+// Run every day at 08:00
+let mut cron_task = RetryableTask::new("digest", "email", "{}".to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+cron_task.cron_expression = Some("0 8 * * *".to_string());
+queue.enqueue(cron_task)?;
+```
+
+### 🛑 Hard Timeouts
+
+```rust
+// Forcefully kill if running > 5 mins
+let mut risky_task = RetryableTask::new("risky", "fetch", "{}".to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+risky_task.max_execution_seconds = Some(300);
+queue.enqueue(risky_task)?;
+```
+
+### 🌐 Webhook Callbacks
+
+```rust
+// Execute via HTTP instead of local handlers
+let mut hook_task = RetryableTask::new("serverless", "resize", "{}".to_string(), 3, 0.0, None, None, None, None, None, None, None, None, None, None);
+hook_task.webhook_url = Some("https://api.example.com/webhook".to_string());
+queue.enqueue(hook_task)?;
+```
+
+*Built with ❤️ for John Wick tier engineering.*
+
