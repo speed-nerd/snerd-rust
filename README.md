@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./assets/Designer-9.png" height="120" alt="Snerd-Rust Logo" />
-  <h1>⚙️ snerd-rust v0.3.0</h1>
+  <h1>⚙️ snerd-rust v0.3.1</h1>
   <p>A blazingly fast, brutally simple, zero-infrastructure async background job engine for Rust.</p>
 
   [![Crates.io](https://img.shields.io/crates/v/snerd-rust.svg)](https://crates.io/crates/snerd-rust)
@@ -10,7 +10,7 @@
   [![Docs](https://img.shields.io/badge/docs-speed--nerd.github.io-blue)](https://speed-nerd.github.io/docs/)
 </div>
 
-> 📝 **What's New in v0.3.0?** Check out the [Changelog & Releases](https://speed-nerd.github.io/docs/changelog) for the latest features including Sharded Queues, Worker Pools, and Job Chaining!
+> 📝 **What's New in v0.3.1?** Check out the [Changelog & Releases](https://speed-nerd.github.io/docs/changelog) for the latest features including Sharded Queues, Worker Pools, and Job Chaining!
 
 If you are tired of wrestling with heavy, bloated background job frameworks like Redis, Postgres tables, or RabbitMQ just to send a few emails in the background... well, you are in the right place.
 
@@ -44,7 +44,7 @@ Just add `snerd-rust` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-snerd-rust = "0.3.0"
+snerd-rust = "0.3.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -408,9 +408,9 @@ If your file ever grows too large (default `20MB` or >10k operations), `snerd-ru
 MIT License. Do whatever you want with it, just don't let your tasks die unhandled.
 
 
-## Advanced Orchestration (v0.3.0 Features)
+## Advanced Orchestration (v0.3.1 Features)
 
-SnerdMQ v0.3.0 introduced powerful new primitives for managing complex background jobs natively in the core engine. Below are examples of how to utilize these features when embedding SnerdMQ in Rust:
+SnerdMQ v0.3.1 introduced powerful new primitives for managing complex background jobs natively in the core engine. Below are examples of how to utilize these features when embedding SnerdMQ in Rust:
 
 ### 🍕 Sharded Queues (Scaling Out)
 
